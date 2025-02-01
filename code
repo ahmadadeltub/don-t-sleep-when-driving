@@ -1,0 +1,123 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+
+# Initialize MediaPipe Face Mesh.
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+# Define eye landmark indices for computing EAR.
+# These indices are based on MediaPipe Face Mesh.
+LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]   # p1, p2, p3, p4, p5, p6 for left eye.
+RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]  # p1, p2, p3, p4, p5, p6 for right eye.
+
+def eye_aspect_ratio(landmarks, eye_indices, frame_width, frame_height):
+    """
+    Computes the Eye Aspect Ratio (EAR) for one eye.
+    EAR = (||p2 - p6|| + ||p3 - p5||) / (2 * ||p1 - p4||)
+    """
+    pts = np.array([
+        (landmarks[i].x * frame_width, landmarks[i].y * frame_height)
+        for i in eye_indices
+    ])
+    
+    # p1: pts[0], p2: pts[1], p3: pts[2], p4: pts[3], p5: pts[4], p6: pts[5]
+    dist_vertical1 = np.linalg.norm(pts[1] - pts[5])
+    dist_vertical2 = np.linalg.norm(pts[2] - pts[4])
+    dist_horizontal = np.linalg.norm(pts[0] - pts[3])
+    
+    ear = (dist_vertical1 + dist_vertical2) / (2.0 * dist_horizontal)
+    return ear
+
+# Parameters for drowsiness detection.
+EAR_THRESHOLD = 0.25  # EAR below this value is considered as closed eye.
+CONSEC_FRAMES = 15    # Number of consecutive frames with closed eyes to trigger alert.
+
+counter = 0  # Counter for consecutive frames below threshold.
+
+# Start capturing video.
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("Error: Could not open webcam.")
+    exit()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Failed to capture frame from webcam.")
+        break
+
+    # Flip frame horizontally for mirror view.
+    frame = cv2.flip(frame, 1)
+    frame_height, frame_width = frame.shape[:2]
+    
+    # Convert the frame to RGB.
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Process the frame with MediaPipe Face Mesh.
+    results = face_mesh.process(rgb_frame)
+    
+    avg_ear = None
+    drowsy = False
+    
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            left_ear = eye_aspect_ratio(face_landmarks.landmark, LEFT_EYE_INDICES, frame_width, frame_height)
+            right_ear = eye_aspect_ratio(face_landmarks.landmark, RIGHT_EYE_INDICES, frame_width, frame_height)
+            avg_ear = (left_ear + right_ear) / 2.0
+            
+            # Draw eye landmarks for visualization.
+            for idx in LEFT_EYE_INDICES + RIGHT_EYE_INDICES:
+                x = int(face_landmarks.landmark[idx].x * frame_width)
+                y = int(face_landmarks.landmark[idx].y * frame_height)
+                cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
+            
+            cv2.putText(frame, f"EAR: {avg_ear:.2f}", (30, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+            
+            if avg_ear < EAR_THRESHOLD:
+                counter += 1
+            else:
+                counter = 0
+            
+            if counter >= CONSEC_FRAMES:
+                drowsy = True
+            break  # Process only the first detected face.
+    else:
+        counter = 0
+
+    # Draw a status indicator circle (this remains at upper-left).
+    indicator_center = (60, 60)
+    indicator_radius = 40
+    if drowsy:
+        status_color = (0, 0, 255)  # Red if drowsy.
+    else:
+        status_color = (0, 255, 0)  # Green if awake.
+    cv2.circle(frame, indicator_center, indicator_radius, status_color, -1)
+    cv2.circle(frame, indicator_center, indicator_radius, (255, 255, 255), 2)
+    
+    # If drowsiness is detected, display an alert at the center of the frame.
+    if drowsy:
+        alert_text = "DROWSINESS DETECTED!"
+        # Get the text size to center it.
+        (text_width, text_height), _ = cv2.getTextSize(alert_text, cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3)
+        text_x = (frame_width - text_width) // 2
+        text_y = (frame_height + text_height) // 2
+        cv2.putText(frame, alert_text, (text_x, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+    
+    cv2.imshow("Es7a ya nayem ", frame)
+    
+    # Exit if 'q' is pressed.
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+
